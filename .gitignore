@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.Python
+.venv/
+venv/
+
+# Experiment outputs
+log/
+logs/
+results/
+checkpoints/
+wandb/
+
+# Downloaded datasets and pretrained weights
+node/data/*
+graph/data/*
+node/pretrained_gnns/*
+graph/pretrained_gnns/*
+!node/pretrained_gnns/
+!graph/pretrained_gnns/
+!node/data/README.md
+!graph/data/README.md
+!node/pretrained_gnns/README.md
+!graph/pretrained_gnns/README.md
+!node/pretrained_gnns/*.pth
+!graph/pretrained_gnns/*.pth
+
+# Local tooling and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
