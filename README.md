@@ -1,7 +1,7 @@
 # Spectral Reversal (SRP)
 
 **Paper:** *Spectral Reversal: Counteracting Singular Value Bias for Graph Prompting*<br>
-**Venue:** NeurIPS 2026  **Spotlight**<br>
+**Venue:** NeurIPS 2026   **Spotlight**<br>
 **Links:** [arXiv:2609.32143](http://arxiv.org/abs/2609.32143)
 
 This repository contains the research implementation of **Spectral Reverse Prompt (SRP)** for parameter-efficient adaptation of pretrained graph neural networks.
