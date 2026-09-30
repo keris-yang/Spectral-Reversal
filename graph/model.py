@@ -47,8 +47,7 @@ class GIN(nn.Module):
             self.convs.append(GINConv(input_dim=hidden_dim, hidden_dim=hidden_dim))
             self.batch_norms.append(nn.BatchNorm1d(hidden_dim))
 
-    def forward(self, data, prompt_type=None, prompt=False, pooling=False,
-                return_extra=False):
+    def forward(self, data, prompt_type=None, prompt=False, pooling=False):
         """Forward pass.
 
         Args:
@@ -56,70 +55,8 @@ class GIN(nn.Module):
             prompt_type: string prompt identifier or None.
             prompt:      prompt module instance or None.
             pooling:     'mean' | False.
-            return_extra: if True and prompt_type=='GraphLoRA', return a 3-tuple
-                          (emb, emb_frozen, emb_lora) for the GCT contrastive
-                          loss.  Ignored for all other prompt types.
         """
         x, edge_index, batch = data.x, data.edge_index, data.batch
-
-        # ------------------------------------------------------------------ #
-        # GraphLoRA: projector + frozen/LoRA branches at last layer for GCT #
-        # ------------------------------------------------------------------ #
-        if prompt_type == 'GraphLoRA':
-            h_list = [x]
-            last = self.num_layer - 1
-
-            for layer in range(self.num_layer):
-                h = h_list[layer]
-                z_frozen = self.convs[layer](h, edge_index, edge_prompt=False)
-                z_frozen = self.batch_norms[layer](z_frozen)
-                z_lora   = prompt.get_prompt(h, edge_index, layer=layer)
-
-                if layer == last:
-                    x_total = F.dropout(z_frozen + z_lora, self.drop_ratio,
-                                        training=self.training)
-                else:
-                    x_total = F.dropout(F.relu(z_frozen + z_lora), self.drop_ratio,
-                                        training=self.training)
-                h_list.append(x_total)
-
-            node_emb = h_list[-1]
-
-            if pooling == 'mean':
-                emb = global_mean_pool(node_emb, batch)
-                if return_extra:
-                    emb_frozen = global_mean_pool(z_frozen, batch)
-                    emb_lora   = global_mean_pool(z_lora,   batch)
-                    return emb, emb_frozen, emb_lora
-                return emb
-            if return_extra:
-                return node_emb, z_frozen, z_lora
-            return node_emb
-
-        # ------------------------------------------------------------------ #
-        # GraphLoFT: projector + LoRA correction, cls_loss only.             #
-        # GCT / rec auxiliary losses are omitted — see graph/graphlora.py.   #
-        # ------------------------------------------------------------------ #
-        elif prompt_type == 'GraphLoFT':
-            h_list = [x]
-            last = self.num_layer - 1
-
-            for layer in range(self.num_layer):
-                h = h_list[layer]
-                z = self.convs[layer](h, edge_index, edge_prompt=False)
-                z = self.batch_norms[layer](z)
-                p = prompt.get_prompt(h, edge_index, layer=layer)
-                x = z + p
-                if layer == last:
-                    x = F.dropout(x, self.drop_ratio, training=self.training)
-                else:
-                    x = F.dropout(F.relu(x), self.drop_ratio, training=self.training)
-                h_list.append(x)
-
-            node_emb = h_list[-1]
-            if pooling == 'mean':
-                return global_mean_pool(node_emb, batch)
-            return node_emb
 
         # ------------------------------------------------------------------ #
         # SRP variants: standard post-BN injection                          #
