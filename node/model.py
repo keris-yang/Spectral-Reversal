@@ -49,8 +49,7 @@ class GCN(nn.Module):
         self.conv2 = GCNConv(hidden_dim, output_dim)
         self.drop_ratio = drop_ratio
 
-    def forward(self, data, prompt_type=None, prompt=None, pooling=False,
-                return_extra=False):
+    def forward(self, data, prompt_type=None, prompt=None, pooling=False):
         """Forward pass.
 
         Args:
@@ -58,70 +57,12 @@ class GCN(nn.Module):
             prompt_type: string prompt identifier or None.
             prompt:      prompt module instance or None.
             pooling:     'mean' | 'target' | False.
-            return_extra: if True and prompt_type=='GraphLoRA', also return the
-                          pooled frozen-branch and LoRA-branch embeddings as a
-                          3-tuple (emb, emb_frozen, emb_lora) for the GCT
-                          contrastive loss.  Ignored for all other prompt types.
         """
         assert pooling in ['mean', 'target', False]
         x, edge_index, batch = data.x, data.edge_index, data.batch
 
-        # ------------------------------------------------------------------ #
-        # GraphLoRA: projector + frozen/LoRA branches at last layer for GCT #
-        # ------------------------------------------------------------------ #
-        if prompt_type == 'GraphLoRA':
-            # Layer 0: frozen + LoRA + ReLU
-            h = x
-            z = self.conv1(h, edge_index, edge_prompt=False)
-            p = prompt.get_prompt(h, edge_index, layer=0)
-            x = F.relu(z + p)
-            x = F.dropout(x, p=self.drop_ratio, training=self.training)
-
-            # Layer 1 (last): keep frozen and LoRA branches separate for GCT
-            h = x
-            z_frozen = self.conv2(h, edge_index, edge_prompt=False)
-            z_lora   = prompt.get_prompt(h, edge_index, layer=1)
-            x_total  = z_frozen + z_lora
-
-            if pooling == 'mean':
-                emb = global_mean_pool(x_total, batch.long())
-                if return_extra:
-                    emb_frozen = global_mean_pool(z_frozen, batch.long())
-                    emb_lora   = global_mean_pool(z_lora,   batch.long())
-                    return emb, emb_frozen, emb_lora
-                return emb
-            if pooling == 'target':
-                idx = data.ptr[:-1] + data.target_node
-                emb = x_total[idx]
-                if return_extra:
-                    return emb, z_frozen[idx], z_lora[idx]
-                return emb
-            if return_extra:
-                return x_total, z_frozen, z_lora
-            return x_total
-
-        # ------------------------------------------------------------------ #
-        # GraphLoFT: projector + LoRA correction, cls_loss only.             #
-        # GCT / rec auxiliary losses are intentionally omitted — they create  #
-        # A↔B gradient cross-coupling that LoFT's rescaling amplifies into   #
-        # instability. See graphlora.py GraphLoFT docstring for details.      #
-        # ------------------------------------------------------------------ #
-        elif prompt_type == 'GraphLoFT':
-            h = x
-            z = self.conv1(h, edge_index, edge_prompt=False)
-            p = prompt.get_prompt(h, edge_index, layer=0)
-            x = F.relu(z + p)
-            x = F.dropout(x, p=self.drop_ratio, training=self.training)
-
-            h = x
-            z = self.conv2(h, edge_index, edge_prompt=False)
-            p = prompt.get_prompt(h, edge_index, layer=1)
-            x = z + p
-
-        # ------------------------------------------------------------------ #
-        # SRP variants: standard post-conv injection                         #
-        # ------------------------------------------------------------------ #
-        elif prompt_type is not None and prompt_type.startswith('SRP'):
+        # SRP variants: standard post-conv injection
+        if prompt_type is not None and prompt_type.startswith('SRP'):
             # Layer 0
             h = x
             z = self.conv1(h, edge_index, edge_prompt=False)

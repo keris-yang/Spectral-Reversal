@@ -7,8 +7,6 @@ Supported prompts:
     SRP-NS    — Ablation: SRP without spectral channel
     SRP-NR    — Ablation: SRP without Reverse mechanism (no mask)
     SRP-Bi    — Ablation: SRP with bidirectional (U-shaped) mask
-    GraphLoRA — Related baseline: GraphLoRA (Wei et al., 2024) with Adam
-    GraphLoFT — Related baseline: GraphLoRA architecture + LoFT dynamics (LoFTAdamW)
 
 shots argument:
     shots > 0  : few-shot (shots labeled nodes per class)
@@ -29,14 +27,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.loader import DataLoader
-from torch_geometric.nn import global_mean_pool
 from sklearn import metrics
 
 from load_data import load_node_data, NodeDownstream
 from model import GCN
 from prompt import SRP
 from prompt_ablation import SRP_NM, SRP_NS, SRP_NR, SRP_Bi
-from graphlora import GraphLoRA, GraphLoFT, LoFTAdamW
 from logger import Logger
 
 
@@ -48,7 +44,7 @@ _PROMPT_CLASSES = {
     'SRP-Bi': SRP_Bi,
 }
 
-_ALL_PROMPT_TYPES = list(_PROMPT_CLASSES.keys()) + ['GraphLoRA', 'GraphLoFT']
+_ALL_PROMPT_TYPES = list(_PROMPT_CLASSES.keys())
 
 
 class NodeTask():
@@ -113,32 +109,19 @@ class NodeTask():
         dim_in_list  = [self.input_dim, self.hidden_dim]
         dim_out_list = [self.hidden_dim, self.hidden_dim]
 
-        if self.prompt_type == 'GraphLoRA':
-            self.prompt = GraphLoRA(
-                dim_in_list=dim_in_list,
-                dim_out_list=dim_out_list,
-                r=self.adapter_dim,
-            ).to(self.device)
-        elif self.prompt_type == 'GraphLoFT':
-            self.prompt = GraphLoFT(
-                dim_in_list=dim_in_list,
-                dim_out_list=dim_out_list,
-                r=self.adapter_dim,
-            ).to(self.device)
-        else:
-            PromptCls = _PROMPT_CLASSES[self.prompt_type]
-            weight_matrices = [
-                self.gnn.conv1.lin.weight.data,
-                self.gnn.conv2.lin.weight.data,
-            ]
-            self.prompt = PromptCls(
-                dim_in_list=dim_in_list,
-                dim_out_list=dim_out_list,
-                weight_matrices=weight_matrices,
-                node_features=self.full_data.x,
-                null_pca_dim=self.pca_dim,
-                r_shared=self.adapter_dim,
-            ).to(self.device)
+        PromptCls = _PROMPT_CLASSES[self.prompt_type]
+        weight_matrices = [
+            self.gnn.conv1.lin.weight.data,
+            self.gnn.conv2.lin.weight.data,
+        ]
+        self.prompt = PromptCls(
+            dim_in_list=dim_in_list,
+            dim_out_list=dim_out_list,
+            weight_matrices=weight_matrices,
+            node_features=self.full_data.x,
+            null_pca_dim=self.pca_dim,
+            r_shared=self.adapter_dim,
+        ).to(self.device)
 
         if hasattr(self.prompt, 'decomp_summary'):
             print(f"[{self.prompt_type}] layer decomp plan:\n{self.prompt.decomp_summary()}")
@@ -153,35 +136,10 @@ class NodeTask():
             list(self.classifier.parameters()) + list(self.prompt.parameters())
         )
 
-        if self.prompt_type == 'GraphLoFT':
-            # LoFTAdamW needs named parameters to identify lora_A / lora_B.
-            # Wrap classifier + prompt in a ModuleDict so named_parameters() works.
-            _wrapper = nn.ModuleDict({
-                'classifier': self.classifier,
-                'prompt': self.prompt,
-            })
-            optimizer = LoFTAdamW(
-                list(_wrapper.parameters()),
-                lr=lr,
-                weight_decay=decay,
-                model=_wrapper,
-                lora_A_name='lora_A',
-                lora_B_name='lora_B',
-                alternate_update=True,
-                rescale_grads=True,
-                reproject_momentum=True,
-                reproject_second_moment=True,
-            )
-        else:
-            optimizer = torch.optim.Adam(learnable_parameters, lr=lr, weight_decay=decay)
+        optimizer = torch.optim.Adam(learnable_parameters, lr=lr, weight_decay=decay)
 
         best_test_accuracy = 0.0
         epoch_times = []
-
-        # GraphLoFT intentionally uses cls_loss only (no GCT / rec auxiliary
-        # losses) because LoFT's gradient rescaling is incompatible with
-        # auxiliary losses that create cross-coupling between A and B gradients.
-        is_graphlora = (self.prompt_type == 'GraphLoRA')
 
         for epoch in range(1, 1 + epochs):
             epoch_start = time.time()
@@ -193,41 +151,9 @@ class NodeTask():
                 data = data.to(self.device)
                 optimizer.zero_grad()
 
-                if is_graphlora:
-                    # GraphLoRA multi-component loss (single forward pass):
-                    #   L = cls_loss + ct_weight * L_ct + rec_weight * L_rec
-                    # Run with pooling=False to get per-node tensors, then pool
-                    # manually — avoids a double forward pass.
-                    x_nodes, z_frozen, z_lora = self.gnn(
-                        data, self.prompt_type, self.prompt,
-                        pooling=False, return_extra=True,
-                    )
-                    batch_idx = data.batch.long()
-                    emb        = global_mean_pool(x_nodes,  batch_idx)  # [B, d]
-                    emb_frozen = global_mean_pool(z_frozen, batch_idx)  # [B, d]
-                    emb_lora   = global_mean_pool(z_lora,   batch_idx)  # [B, d]
-
-                    out    = self.classifier(emb)
-                    labels = data.y.squeeze()
-
-                    # Module classification loss
-                    cls_loss = F.cross_entropy(out, labels)
-                    # GCT contrastive loss between the frozen and LoRA branches
-                    ct_loss = GraphLoRA.gct_loss(
-                        emb_frozen, emb_lora, labels=labels, tau=0.5,
-                    )
-                    # Adjacency reconstruction loss from per-node class logits
-                    logits_per_node = self.classifier(x_nodes)
-                    rec_loss = GraphLoRA.reconstruction_loss(
-                        logits_per_node, data.edge_index, x_nodes.size(0),
-                    )
-                    loss = (cls_loss
-                            + self.prompt.ct_weight  * ct_loss
-                            + self.prompt.rec_weight * rec_loss)
-                else:
-                    emb = self.gnn(data, self.prompt_type, self.prompt, pooling='mean')
-                    out = self.classifier(emb)
-                    loss = F.cross_entropy(out, data.y.squeeze())
+                emb = self.gnn(data, self.prompt_type, self.prompt, pooling='mean')
+                out = self.classifier(emb)
+                loss = F.cross_entropy(out, data.y.squeeze())
 
                 loss.backward()
                 optimizer.step()
